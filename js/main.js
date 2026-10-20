@@ -119,13 +119,14 @@
   phone.addEventListener('focus', function () { if (!phone.value) phone.value = '+7 ('; });
   phone.addEventListener('blur', function () { if (phone.value.replace(/\D/g, '').length <= 1) phone.value = ''; });
 
-  /* ---------- Отправка формы ----------
-     Сейчас заявка не уходит на сервер: подключите обработчик,
-     указав адрес в FORM_ENDPOINT (например, скрипт на хостинге или сервис форм). */
-  var FORM_ENDPOINT = '';
+  /* URL опубликованного веб-приложения Apps Script (не адрес таблицы).
+     Инструкция: integrations/google-sheets/README.md */
+  var FORM_ENDPOINT = 'https://script.google.com/macros/s/AKfycbzXRl0T0jIzmMeFy-k9hgJxwtzdCk-GmS0NgIKnrWY0cS5RijlhqVcWx5009A5vlpex/exec';
   var form = document.getElementById('signup-form');
   var errorBox = document.getElementById('form-error');
   var success = document.getElementById('form-success');
+  var pending = false;
+  var requestId = '';
 
   function showError(msg, field) {
     errorBox.textContent = msg;
@@ -146,6 +147,7 @@
 
   form.addEventListener('submit', function (e) {
     e.preventDefault();
+    if (pending) return;
     errorBox.classList.add('hidden');
     var f = form.elements;
     if (f.name.value.trim().length < 2) return showError('Укажите, пожалуйста, ваше имя.', f.name);
@@ -153,40 +155,72 @@
     if (!f.age.value) return showError('Выберите возраст ребёнка.', f.age);
     if (!f.branch.value) return showError('Выберите филиал.', f.branch);
     if (!f.agree.checked) return showError('Нужно согласие на обработку персональных данных.');
+    if (!/^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/.test(FORM_ENDPOINT)) {
+      return showError('Онлайн-запись пока недоступна. Позвоните нам: +7 (909) 793-58-77.');
+    }
+    if (!requestId) requestId = crypto.randomUUID();
 
     var data = {
       name: f.name.value.trim(),
       phone: f.phone.value,
       age: f.age.value,
       branch: f.branch.options[f.branch.selectedIndex].text,
-      plan: f.plan.value || 'Пробное занятие'
+      plan: f.plan.value || 'Пробное занятие',
+      agree: 'yes',
+      website: f.website.value,
+      requestId: requestId
     };
 
     var btn = form.querySelector('button[type="submit"]');
     btn.disabled = true;
     btn.textContent = 'Отправляем…';
+    pending = true;
 
     var done = function () {
       form.classList.add('hidden');
       success.classList.remove('hidden');
     };
 
-    if (FORM_ENDPOINT) {
-      fetch(FORM_ENDPOINT, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(data)
-      }).then(function (r) {
-        if (!r.ok) throw new Error(r.status);
-        done();
-      }).catch(function () {
-        btn.disabled = false;
-        btn.textContent = 'Записаться на бесплатное занятие';
-        showError('Не удалось отправить заявку. Позвоните нам: +7 (909) 793-58-77.');
-      });
-    } else {
-      setTimeout(done, 500);
+    // POST через iframe: не требует CORS и не передаёт телефон в URL.
+    // Успех показываем только после подтверждения записи из Apps Script.
+    var frame = document.createElement('iframe');
+    frame.name = 'signup-' + crypto.randomUUID();
+    frame.hidden = true;
+    frame.title = 'Отправка заявки';
+    var transport = document.createElement('form');
+    transport.hidden = true;
+    transport.method = 'POST';
+    transport.action = FORM_ENDPOINT;
+    transport.target = frame.name;
+    Object.keys(data).forEach(function (key) {
+      var input = document.createElement('input');
+      input.type = 'hidden';
+      input.name = key;
+      input.value = data[key];
+      transport.appendChild(input);
+    });
+    function finish(ok) {
+      clearTimeout(timer);
+      window.removeEventListener('message', receive);
+      transport.remove();
+      frame.remove();
+      pending = false;
+      btn.disabled = false;
+      btn.textContent = 'Записаться на бесплатное занятие';
+      if (ok) done();
+      else showError('Не удалось подтвердить отправку. Попробуйте ещё раз или позвоните: +7 (909) 793-58-77.');
     }
+    function receive(event) {
+      if (!/^https:\/\/(?:script\.google\.com|script\.googleusercontent\.com|[a-z0-9-]+-script\.googleusercontent\.com)$/.test(event.origin)) return;
+      var reply = event.data;
+      if (!reply || reply.type !== 'jaguar-signup' || reply.requestId !== requestId) return;
+      finish(reply.ok === true);
+    }
+    window.addEventListener('message', receive);
+    var timer = setTimeout(function () { finish(false); }, 45000);
+    document.body.appendChild(frame);
+    document.body.appendChild(transport);
+    transport.submit();
   });
 
   /* ---------- Год в подвале ---------- */
